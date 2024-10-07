@@ -105,41 +105,62 @@ class VkAudio(object):
         else:
             offset_diff = TRACKS_PER_USER_PAGE
 
-        offset = 0
-        while True:
-            response = self._vk.http.post(
-                'https://m.vk.com/audio',
-                data={
-                    'act': 'load_section',
-                    'owner_id': owner_id,
-                    'playlist_id': album_id if album_id else -1,
-                    'offset': offset,
-                    'type': 'playlist',
-                    'access_hash': access_hash,
-                    'is_loading_all': 1
-                },
-                allow_redirects=False
-            ).json()
+        response = self._vk.http.get(
+            f'https://vk.com/audios{owner_id}',
+            allow_redirects=False
+        )
 
-            if not response['data'][0]:
+        # ","sectionId":"PUldVA8FU0pkXktMF0EYAzQ0BR9GQElKZFJLTAQYSV5kUVxFDQVZUH5ZUAs","
+        section_id = re.search(r'"sectionId":"(.*?)"', response.text).group(1)
+        start_from = None
+
+        while True:
+            request_data = {
+                'al': 1,
+                'section_id': section_id,
+            }
+            api_handle = 'audio'
+            if start_from:
+                request_data['start_from'] = start_from
+                api_handle = 'al_audio.php'
+
+            response = self._vk.http.post(
+                f'https://vk.com/{api_handle}?act=load_catalog_section',
+                data=request_data,
+                allow_redirects=False
+            )
+            # open('response.json', 'w', encoding='utf-8').write(response.text)
+            response = json.loads(response.text.replace('<!--', ''))
+
+
+
+            if response['payload'][0]:
                 raise AccessDenied(
                     f"You don\'t have permissions to browse {owner_id}\'s albums"
                 )
 
-            ids = scrap_ids(
-                response['data'][0]['list']
-            )
-            if not ids:
-                break
+            liked_tracks = response['payload'][1][1]['playlist']
 
-            yield from scrap_tracks(
-                ids,
-                self.user_id,
-                self._vk.http,
-                convert_m3u8_links=self.convert_m3u8_links,
-            )
-            if response['data'][0]['hasMore']:
-                offset += offset_diff
+            def scrap_basic_data(audio_data):
+                basic_data = []
+
+                for track in audio_data:
+                    basic_data.append({
+                        'id': track[0],
+                        'title': track[3],
+                        'artist': track[4],
+                    })
+
+                return basic_data
+
+            # ids = scrap_basic_data(liked_tracks['list'])
+
+            yield from scrap_basic_data(liked_tracks['list'])
+
+            time.sleep(RPS_DELAY_LOAD_SECTION)
+            if liked_tracks.get('hasMore'):
+                start_from = liked_tracks.get('nextOffset') + ' ' + liked_tracks.get('blockId')
+                # print(start_from)
             else:
                 break
 
@@ -206,7 +227,7 @@ class VkAudio(object):
             'https://vk.com/al_audio.php',
             data={
                 'al': 1,
-                'act': 'section',
+                'act': 'load_catalog_section',
                 'claim': 0,
                 'is_layer': 0,
                 'owner_id': owner_id,
@@ -214,6 +235,7 @@ class VkAudio(object):
                 'q': q
             }
         )
+
         json_response = json.loads(response.text.replace('<!--', ''))
 
         if not json_response['payload'][1]:
@@ -221,10 +243,11 @@ class VkAudio(object):
                 f"You don\'t have permissions to browse {owner_id}\'s audio"
             )
 
-        if json_response['payload'][1][1]['playlists']:
+
+        if json_response['payload'][1][1]['playlist']:
 
             ids = scrap_ids(
-                json_response['payload'][1][1]['playlists'][0]['list']
+                json_response['payload'][1][1]['playlist'][0]['list']
             )
 
             tracks = scrap_tracks(
